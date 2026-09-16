@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ТОО «ВЖДО» — Исполнительская дисциплина</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root { --navy:#0f172a; --navy-light:#1e293b; --blue-active:#2563eb; }
+    body { font-family: Inter, system-ui, -apple-system, sans-serif; }
+    .sidebar { background: var(--navy); min-height: 100vh; }
+    .nav-item.active { background: var(--blue-active); color: #fff; }
+    .nav-item:hover:not(.active) { background: var(--navy-light); }
+    .kpi-card { transition: .2s; cursor: pointer; }
+    .kpi-card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,.1); }
+    .status-badge { font-size:.75rem; padding:.25rem .75rem; border-radius:9999px; font-weight:500; }
+    .table-wrap { max-height: 560px; overflow: auto; }
+    .table-wrap thead th { position: sticky; top: 0; background: #f8fafc; z-index: 10; }
+    .drawer { transform: translateX(100%); transition: transform .3s ease; }
+    .drawer.open { transform: translateX(0); }
+    .filter-chip { display:inline-flex; align-items:center; gap:.25rem; padding:.2rem .55rem; background:#e0e7ff; color:#3730a3; border-radius:9999px; font-size:.75rem; }
+    .empty-state { color:#94a3b8; }
+    select, input[type=search], input[type=date] { max-width: 220px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+<div id="app" class="flex min-h-screen">
+  <aside class="sidebar w-56 flex-shrink-0 text-white flex flex-col">
+    <div class="p-4 border-b border-slate-700">
+      <div class="text-lg font-bold">ТОО «ВЖДО»</div>
+      <div class="text-xs text-slate-400 mt-1">Исполнительская дисциплина</div>
+    </div>
+    <nav class="flex-1 py-3 space-y-1 px-2">
+      <button data-page="overview" class="nav-item active w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium"><i data-lucide="home" class="w-4 h-4"></i> Обзор</button>
+      <button data-page="protocols" class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-300"><i data-lucide="file-text" class="w-4 h-4"></i> Протоколы</button>
+      <button data-page="eotinish" class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-300"><i data-lucide="clipboard-list" class="w-4 h-4"></i> e-Өтініш</button>
+      <button data-page="incoming" class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-300"><i data-lucide="inbox" class="w-4 h-4"></i> Входящие</button>
+    </nav>
+    <div class="p-2 border-t border-slate-700">
+      <button data-page="upload" class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-300"><i data-lucide="database" class="w-4 h-4"></i> Загрузка</button>
+    </div>
+  </aside>
+  <main class="flex-1 overflow-auto">
+    <div id="page-content" class="p-6 max-w-[1700px]"></div>
+  </main>
+</div>
+<div id="drawer-overlay" class="fixed inset-0 bg-black/30 z-40 hidden" onclick="closeDrawer()"></div>
+<div id="document-drawer" class="drawer fixed top-0 right-0 h-full w-full max-w-lg bg-white shadow-2xl z-50 overflow-y-auto">
+  <div class="p-5 border-b flex items-center justify-between sticky top-0 bg-white z-10">
+    <h3 class="text-lg font-semibold">Карточка документа</h3>
+    <button onclick="closeDrawer()" class="p-1.5 rounded-lg hover:bg-slate-100"><i data-lucide="x" class="w-5 h-5"></i></button>
+  </div>
+  <div id="drawer-body" class="p-5 space-y-4"></div>
+</div>
+<script>
+const STRUCTURE_URLS = [
+  './structure.xlsx',
+  'structure.xlsx',
+  './Structure.xlsx',
+  './Структура.xlsx',
+  './%D0%A1%D1%82%D1%80%D1%83%D0%BA%D1%82%D1%83%D1%80%D0%B0.xlsx',
+  'Структура.xlsx'
+];
+
+const emptyFilters = () => ({
+  dateStart: null, dateEnd: null, curator: 'ALL', departmentHead: 'ALL', department: 'ALL',
+  responsible: 'ALL', deadlineCategory: 'ALL', status: 'ALL', appealType: 'ALL',
+  applicant: 'ALL', correspondent: 'ALL', searchQuery: '', tab: null, periodPreset: 'ALL'
+});
+
+const state = {
+  protocols: [], eOtinish: [], incoming: [],
+  structure: [],
+  meta: { protocols:null, eOtinish:null, incoming:null, structure:null },
+  referenceDate: startOfDay(new Date()),
+  activePage: 'overview',
+  selectedMetric: null,
+  selectedRecord: null,
+  filters: emptyFilters(),
+  dataLoaded: false,
+  lastValidation: null
+};
+
+function startOfDay(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
+function normalizeText(v){ if(v==null) return ''; return String(v).replace(/\u00A0/g,' ').replace(/[\r\n]+/g,' ').replace(/\s+/g,' ').trim(); }
+function isMissing(v){ const s=normalizeText(v); return !s || s==='-' || /^null|undefined$/i.test(s); }
+function normalizePersonName(v){
+  let s=normalizeText(v).toLowerCase().replace(/ё/g,'е');
+  s=s.replace(/[«»"']/g,'').replace(/,/g,' ');
+  s=s.replace(/\./g,'.').replace(/\s+/g,' ').trim();
+  return s;
+}
+function initialsKey(full){
+  const p=normalizePersonName(full).split(' ').filter(Boolean);
+  if(!p.length) return '';
+  const sur=p[0];
+  const ini=p.slice(1).map(x=>x.replace(/\./g,'')[0]||'').join('');
+  return sur+' '+ini;
+}
+function extractPersonCandidates(raw){
+  const text=normalizeText(raw);
+  if(!text) return [];
+  const parts=text.split(/[,;/\n]| и |\/|\t/).map(normalizeText).filter(Boolean);
+  const out=[];
+  const re=/(?:^|\s)([А-ЯЁӘІҢҒҮҰҚӨҺA-Z][а-яёәіңғүұқөһa-z\-]+)\s+([А-ЯЁӘІҢҒҮҰҚӨҺA-Z]\.?\s*[А-ЯЁӘІҢҒҮҰҚӨҺA-Z]\.?)/g;
+  const re2=/(?:^|\s)([А-ЯЁӘІҢҒҮҰҚӨҺA-Z][а-яёәіңғүұқөһa-z\-]+)\s+([А-ЯЁӘІҢҒҮҰҚӨҺA-Z][а-яёәіңғүұқөһa-z\-]+)\s+([А-ЯЁӘІҢҒҮҰҚӨҺA-Z][а-яёәіңғүұқөһa-z\-]+)/g;
+  for(const chunk of [text,...parts]){
+    let m; const r1=new RegExp(re); while((m=r1.exec(chunk))) out.push(m[1]+' '+m[2].replace(/\s+/g,''));
+    const r2=new RegExp(re2); while((m=r2.exec(chunk))) out.push(m[1]+' '+m[2]+' '+m[3]);
+    if(/[А-ЯЁӘІҢҒҮҰҚӨҺA-Z][а-яёәіңғүұқөһa-z]{2,}/.test(chunk) && chunk.split(' ').length<=5) out.push(chunk);
+  }
+  return [...new Set(out.map(normalizeText).filter(x=>x.length>=3))];
+}
+function parseFlexibleDate(v){
+  if(v==null || v==='' || v==='-') return null;
+  if(v instanceof Date && !isNaN(v.getTime())) return startOfDay(v);
+  if(typeof v==='object' && v.type==='text') return v;
+  if(typeof v==='number' && isFinite(v)){
+    if(typeof XLSX!=='undefined' && XLSX.SSF && XLSX.SSF.parse_date_code){
+      const d=XLSX.SSF.parse_date_code(v);
+      if(d) return new Date(d.y, d.m-1, d.d);
+    }
+    const epoch=new Date(Math.round((v-25569)*86400*1000));
+    if(!isNaN(epoch)) return startOfDay(epoch);
+  }
+  const s=normalizeText(String(v));
+  const low=s.toLowerCase();
+  if(/постоянн|еженедельн|на постоянной|ежемесяч|ежекварт/.test(low)) return {type:'text', value:s};
+  let m=s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if(m) return new Date(+m[3], +m[2]-1, +m[1]);
+  m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(m) return new Date(+m[1], +m[2]-1, +m[3]);
+  const dt=new Date(s);
+  if(!isNaN(dt.getTime()) && /\d{4}/.test(s)) return startOfDay(dt);
+  return null;
+}
+function daysBetween(deadline, ref){
+  if(!deadline || deadline.type==='text' || !(deadline instanceof Date) || !(ref instanceof Date)) return null;
+  return Math.round((startOfDay(deadline)-startOfDay(ref))/86400000);
+}
+function formatDate(d){
+  if(!d) return '—';
+  if(d.type==='text') return d.value;
+  if(!(d instanceof Date) || isNaN(d)) return '—';
+  return d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'});
+}
+
+function normalizeProtocolStatus(raw){
+  const s=normalizeText(raw).toLowerCase();
+  if(!s) return 'Не определено';
+  if(/на\s*снят/.test(s) || /снятий/.test(s)) return 'На снятии с контроля';
+  if(/просроч/.test(s)) return 'Просрочено';
+  if(/рабочий\s*контроль/.test(s)) return 'Рабочий контроль';
+  if(/снят|снято/.test(s)) return 'Снят с контроля';
+  if(/^в\s*работе$/.test(s) || s==='в работе') return 'В работе';
+  if(/в\s*работе/.test(s)) return 'В работе';
+  return 'Не определено';
+}
+function normalizeIncomingStatus(raw){
+  const s=normalizeText(raw).toLowerCase();
+  if(!s) return 'Не определено';
+  if(/на\s*исполнен/.test(s)) return 'На исполнении';
+  if(/не\s*исполн/.test(s)) return 'Не исполнено';
+  if(/выполнен/.test(s) || /^исполнен/.test(s) || s==='исполнено') return 'Выполнено';
+  return raw || 'Не определено';
+}
+function normalizeEStatus(raw){
+  const s=normalizeText(raw).toLowerCase();
+  if(/заверш/.test(s)) return 'Завершено';
+  if(/на\s*исполнен/.test(s)) return 'На исполнении';
+  return raw || 'Не определено';
+}
+
+function mapEmployeeToStructure(nameRaw, structure){
+  const fallback={department:'Не определено',departmentHead:'Не определено',curator:'Не определено'};
+  if(isMissing(nameRaw) || !structure.length) return fallback;
+  const candidates=extractPersonCandidates(nameRaw);
+  const tryList=candidates.length?candidates:[normalizeText(nameRaw)];
+  for(const cand of tryList){
+    const n=normalizePersonName(cand);
+    let match=structure.find(e=>normalizePersonName(e.employeeName)===n);
+    if(match) return fillEnrich(match);
+    const ik=initialsKey(cand);
+    const hits=structure.filter(e=>initialsKey(e.employeeName)===ik && ik);
+    if(hits.length===1) return fillEnrich(hits[0]);
+    const sur=n.split(' ')[0];
+    if(sur && sur.length>3){
+      const bySur=structure.filter(e=>normalizePersonName(e.employeeName).split(' ')[0]===sur);
+      if(bySur.length===1) return fillEnrich(bySur[0]);
+    }
+  }
+  return fallback;
+}
+function fillEnrich(m){
+  return {
+    department: m.department || 'Не определено',
+    departmentHead: m.departmentHead || 'Не определено',
+    curator: m.curator || 'Не определено'
+  };
+}
+
+function findHeaderRow(rows, required, maxScan=20){
+  let best={score:0,idx:-1};
+  for(let i=0;i<Math.min(maxScan,rows.length);i++){
+    const row=rows[i].map(c=>normalizeText(c).toLowerCase());
+    let score=0;
+    for(const h of required){
+      const hl=h.toLowerCase();
+      if(row.some(c=>c && (c.includes(hl)||hl.includes(c)))) score++;
+    }
+    if(score>best.score) best={score,idx:i};
+  }
+  return best.score>=Math.ceil(required.length*0.45)?best.idx:-1;
+}
+
+function parseStructure(wb){
+  const sheetName=wb.SheetNames.find(n=>/ца/i.test(n))||wb.SheetNames[0];
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:''});
+  let dataStart=0;
+  for(let i=0;i<Math.min(12,rows.length);i++){
+    const r=rows[i].map(c=>normalizeText(c).toLowerCase());
+    if(r.some(c=>c.includes('ф.и.о')||c.includes('фио'))){
+      dataStart=i+1;
+      if(rows[i+1] && rows[i+1].some(c=>/наименование|руководитель/i.test(String(c)))) dataStart=i+2;
+      break;
+    }
+  }
+  const employees=[];
+  for(let i=dataStart;i<rows.length;i++){
+    const name=normalizeText(rows[i][0]);
+    if(!name || name.length<3) continue;
+    employees.push({
+      employeeName:name,
+      employeePosition:normalizeText(rows[i][1]),
+      department:normalizeText(rows[i][2]),
+      curator:normalizeText(rows[i][3]),
+      departmentHead:normalizeText(rows[i][4]),
+      departmentDecode:normalizeText(rows[i][5]||'')
+    });
+  }
+  if(employees.length<5) throw new Error('В структуре слишком мало сотрудников');
+  return {employees,sheetName,validCount:employees.length};
+}
+
+function parseProtocols(wb, structure){
+  const sheetName=wb.SheetNames.find(n=>/протокол/i.test(n))||wb.SheetNames[0];
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:'',raw:false});
+  const headerIdx=findHeaderRow(rows,['№ Протокола','№ поручения','Содержание','Сроки','Контроль']);
+  if(headerIdx<0) throw new Error('Не найден заголовок таблицы протоколов');
+  const headers=rows[headerIdx].map(h=>normalizeText(h));
+  const col=name=>headers.findIndex(h=>h.toLowerCase().includes(name.toLowerCase()));
+  const cProtocol=col('протокол'), cNum=col('поручения'), cText=col('содержание');
+  const cResp=col('руководители')>=0?col('руководители'):col('ответственн');
+  const cDeadline=col('сроки')>=0?col('сроки'):col('срок');
+  const cExec=col('статус исполнения'), cFurther=col('дальнейший'), cControl=headers.length-1;
+  const records=[]; let ignored=0;
+  const rawRows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:'',raw:true});
+  for(let i=headerIdx+1;i<rows.length;i++){
+    const r=rows[i], raw=rawRows[i]||r;
+    const protocolRaw=normalizeText(r[cProtocol]);
+    const assignNum=normalizeText(r[cNum]);
+    const text=normalizeText(r[cText]);
+    if(!assignNum && !text){ ignored++; continue; }
+    const deadlineVal=cDeadline>=0?(raw[cDeadline]!==''&&raw[cDeadline]!=null?raw[cDeadline]:r[cDeadline]):'';
+    const deadlineParsed=parseFlexibleDate(deadlineVal);
+    const controlRaw=cControl>=0?normalizeText(r[cControl]):'';
+    const controlNorm=normalizeProtocolStatus(controlRaw);
+    const respRaw=cResp>=0?normalizeText(r[cResp]):'';
+    const persons=extractPersonCandidates(respRaw);
+    const primary=persons[0]||respRaw;
+    const enrich=mapEmployeeToStructure(primary, structure);
+    let isOverdue=false;
+    if(controlNorm==='Просрочено') isOverdue=true;
+    else if(controlNorm!=='Снят с контроля' && deadlineParsed && deadlineParsed instanceof Date){
+      if(deadlineParsed<state.referenceDate) isOverdue=true;
+    }
+    records.push({
+      id:'p-'+i, sourceFile:'1.xlsx', sourceSheet:sheetName, sourceRow:i+1,
+      protocol:protocolRaw, assignmentNumber:assignNum, assignmentText:text,
+      responsibleRaw:respRaw, responsiblePersons:persons.length?persons:[respRaw].filter(Boolean),
+      deadlineRaw:normalizeText(deadlineVal), deadlineDate:deadlineParsed,
+      executionStatusRaw:cExec>=0?normalizeText(r[cExec]):'',
+      furtherControl:cFurther>=0?normalizeText(r[cFurther]):'',
+      controlStatusRaw:controlRaw, controlStatusNormalized:controlNorm, isOverdue,
+      department:enrich.department, departmentHead:enrich.departmentHead, curator:enrich.curator
+    });
+  }
+  if(!records.length) throw new Error('Не найдено ни одного поручения');
+  return {records,sheetName,validCount:records.length,ignoredCount:ignored};
+}
+
+function parseEOtinish(wb, structure){
+  const sheetName=wb.SheetNames.find(n=>/report/i.test(n))||wb.SheetNames[0];
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:'',raw:false});
+  const rawRows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:'',raw:true});
+  const headerIdx=findHeaderRow(rows,['Номер обращения','Дата регистрации','Автор','Статус исполнения']);
+  if(headerIdx<0) throw new Error('Не найден заголовок таблицы e-Өтініш');
+  const headers=rows[headerIdx].map(h=>normalizeText(h));
+  const col=name=>headers.findIndex(h=>h.toLowerCase().includes(name.toLowerCase()));
+  const cNum=col('номер обращения'), cReg=col('дата регистрации'), cAuthor=col('автор');
+  const cType=col('вид обращения'), cSummary=col('краткое содержание');
+  const cDeadline=col('срок исполнения'), cDays=col('осталось дней');
+  const cRespDate=col('дата предоставления'), cStatus=col('статус исполнения');
+  const cResp=col('ответственный исполнитель'), cDept=col('структурное подразделение');
+  const records=[]; let ignored=0;
+  for(let i=headerIdx+1;i<rows.length;i++){
+    const r=rows[i], raw=rawRows[i]||r;
+    const num=normalizeText(r[cNum]);
+    if(!num){ ignored++; continue; }
+    const statusRaw=normalizeText(r[cStatus]);
+    const statusNorm=normalizeEStatus(statusRaw);
+    let daysRem=null;
+    if(cDays>=0 && !isMissing(r[cDays])){ const d=Number(String(r[cDays]).replace(',','.')); if(!isNaN(d)) daysRem=d; }
+    const deadline=parseFlexibleDate(cDeadline>=0?(raw[cDeadline]||r[cDeadline]):'');
+    if(daysRem==null && deadline instanceof Date) daysRem=daysBetween(deadline, state.referenceDate);
+    const resp=normalizeText(r[cResp]);
+    const enrich=mapEmployeeToStructure(resp, structure);
+    records.push({
+      id:'e-'+i, sourceFile:'2.xlsx', sourceSheet:sheetName, sourceRow:i+1,
+      appealNumber:num, registrationDate:parseFlexibleDate(cReg>=0?(raw[cReg]||r[cReg]):''),
+      applicant:normalizeText(r[cAuthor]), appealType:normalizeText(r[cType]),
+      summary:normalizeText(r[cSummary]), deadline, daysRemaining:daysRem,
+      responseDate:parseFlexibleDate(cRespDate>=0?(raw[cRespDate]||r[cRespDate]):''),
+      executionStatusRaw:statusRaw, executionStatusNormalized:statusNorm,
+      responsibleEmployee:resp, department:normalizeText(r[cDept])||enrich.department,
+      departmentHead:enrich.departmentHead, curator:enrich.curator
+    });
+  }
+  if(!records.length) throw new Error('Не найдено обращений');
+  return {records,sheetName,validCount:records.length,ignoredCount:ignored};
+}
+
+function parseIncoming(wb, structure){
+  const sheetName=wb.SheetNames.find(n=>/напомин/i.test(n))||wb.SheetNames[0];
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:'',raw:false});
+  const rawRows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{header:1,defval:'',raw:true});
+  const headerIdx=findHeaderRow(rows,['№ п.п.','Рег. номер','Корреспондент','Статус исполнения']);
+  if(headerIdx<0) throw new Error('Не найден заголовок таблицы входящих');
+  const headers=rows[headerIdx].map(h=>normalizeText(h));
+  const col=name=>headers.findIndex(h=>h.toLowerCase().includes(name.toLowerCase()));
+  const cReg=col('рег. номер'), cExt=col('исх'), cCorr=col('корреспондент'), cSum=col('краткое содержание');
+  const cResp=col('ответственный'), cDept=col('подразделение');
+  const cDeadline=col('срок исполнения'), cDays=col('осталось')>=0?col('осталось'):col('просрочено');
+  const cExtDead=col('внешний срок'), cStatus=col('статус исполнения');
+  const records=[]; let ignored=0;
+  for(let i=headerIdx+1;i<rows.length;i++){
+    const r=rows[i], raw=rawRows[i]||r;
+    const reg=normalizeText(r[cReg]);
+    if(!reg){ ignored++; continue; }
+    const statusRaw=normalizeText(r[cStatus]);
+    const statusNorm=normalizeIncomingStatus(statusRaw);
+    let daysRem=null;
+    if(cDays>=0 && !isMissing(r[cDays])){ const d=Number(String(r[cDays]).replace(/[^\d\-]/g,'')); if(!isNaN(d)) daysRem=d; }
+    const deadline=parseFlexibleDate(cDeadline>=0?(raw[cDeadline]||r[cDeadline]):'');
+    if(daysRem==null && deadline instanceof Date) daysRem=daysBetween(deadline, state.referenceDate);
+    const resp=normalizeText(r[cResp]);
+    const enrich=mapEmployeeToStructure(resp, structure);
+    records.push({
+      id:'i-'+i, sourceFile:'3.xlsx', sourceSheet:sheetName, sourceRow:i+1,
+      registrationNumberAndDate:reg, externalNumberDate:normalizeText(r[cExt]),
+      correspondent:normalizeText(r[cCorr]), summary:normalizeText(r[cSum]),
+      responsibleEmployee:resp, department:normalizeText(r[cDept])||enrich.department,
+      deadline, daysRemaining:daysRem, externalDeadline:parseFlexibleDate(cExtDead>=0?(raw[cExtDead]||r[cExtDead]):''),
+      executionStatusRaw:statusRaw, executionStatusNormalized:statusNorm,
+      departmentHead:enrich.departmentHead, curator:enrich.curator
+    });
+  }
+  if(!records.length) throw new Error('Не найдено входящих документов');
+  return {records,sheetName,validCount:records.length,ignoredCount:ignored};
+}
+
+function deadlineCategoryOf(deadline, daysRem){
+  if(daysRem!=null){
+    if(daysRem<0) return 'overdue';
+    if(daysRem===0) return 'today';
+    if(daysRem<=3) return 'd13';
+    if(daysRem<=7) return 'd47';
+    if(daysRem<=30) return 'd830';
+    return 'd30p';
+  }
+  if(deadline && deadline instanceof Date){
+    const d=daysBetween(deadline, state.referenceDate);
+    return deadlineCategoryOf(deadline, d);
+  }
+  return 'none';
+}
+
+function applyCommonFilters(records, type){
+  const f=state.filters;
+  return records.filter(r=>{
+    if(f.curator!=='ALL' && normalizeText(r.curator)!==f.curator) return false;
+    if(f.departmentHead!=='ALL' && normalizeText(r.departmentHead)!==f.departmentHead) return false;
+    if(f.department!=='ALL' && normalizeText(r.department)!==f.department) return false;
+    if(f.responsible!=='ALL'){
+      const bag=type==='protocol'?[r.responsibleRaw,...(r.responsiblePersons||[])]:[r.responsibleEmployee];
+      if(!bag.some(p=>normalizeText(p).toLowerCase().includes(f.responsible.toLowerCase()))) return false;
+    }
+    if(f.correspondent!=='ALL' && type==='incoming' && normalizeText(r.correspondent)!==f.correspondent) return false;
+    if(f.applicant!=='ALL' && type==='eotinish' && normalizeText(r.applicant)!==f.applicant) return false;
+    if(f.appealType!=='ALL' && type==='eotinish' && normalizeText(r.appealType)!==f.appealType) return false;
+    if(f.status!=='ALL'){
+      const st=type==='protocol'?r.controlStatusNormalized:r.executionStatusNormalized;
+      if(st!==f.status) return false;
+    }
+    const dateField=type==='eotinish'?r.registrationDate:r.deadlineDate||r.deadline;
+    if(f.dateStart && dateField instanceof Date && dateField<new Date(f.dateStart)) return false;
+    if(f.dateEnd && dateField instanceof Date && dateField>new Date(f.dateEnd+'T23:59:59')) return false;
+    if(f.deadlineCategory!=='ALL'){
+      const days=r.daysRemaining!=null?r.daysRemaining:daysBetween(r.deadlineDate||r.deadline, state.referenceDate);
+      if(deadlineCategoryOf(r.deadlineDate||r.deadline, days)!==f.deadlineCategory) return false;
+    }
+    if(f.searchQuery){
+      const q=f.searchQuery.toLowerCase();
+      const hay=(type==='protocol'
+        ?[r.protocol,r.assignmentNumber,r.assignmentText,r.responsibleRaw,r.department]
+        :type==='eotinish'
+        ?[r.appealNumber,r.applicant,r.appealType,r.summary,r.responsibleEmployee,r.department]
+        :[r.registrationNumberAndDate,r.externalNumberDate,r.correspondent,r.summary,r.responsibleEmployee,r.department]
+      ).join(' ').toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function isProtoOverdue(r){ return r.controlStatusNormalized==='Просрочено' || (!!r.isOverdue && r.controlStatusNormalized!=='Снят с контроля'); }
+function isEOverdue(r){ return r.executionStatusNormalized==='На исполнении' && r.daysRemaining!=null && r.daysRemaining<0; }
+function isEDue7(r){ return r.executionStatusNormalized==='На исполнении' && r.daysRemaining!=null && r.daysRemaining>=0 && r.daysRemaining<=7; }
+function isIncUnfinished(r){ return r.executionStatusNormalized==='Не исполнено' || r.executionStatusNormalized==='На исполнении'; }
+function isIOverdue(r){ return isIncUnfinished(r) && r.daysRemaining!=null && r.daysRemaining<0; }
+function isIDue7(r){ return isIncUnfinished(r) && r.daysRemaining!=null && r.daysRemaining>=0 && r.daysRemaining<=7; }
+
+function getProtocolKPIs(list){
+  return {
+    total:list.length,
+    overdue:list.filter(isProtoOverdue).length,
+    inWork:list.filter(r=>r.controlStatusNormalized==='В работе').length,
+    working:list.filter(r=>r.controlStatusNormalized==='Рабочий контроль').length,
+    pending:list.filter(r=>r.controlStatusNormalized==='На снятии с контроля').length,
+    removed:list.filter(r=>r.controlStatusNormalized==='Снят с контроля').length
+  };
+}
+function getEOtinishKPIs(list){
+  return {
+    total:list.length,
+    overdue:list.filter(isEOverdue).length,
+    due7:list.filter(isEDue7).length,
+    done:list.filter(r=>r.executionStatusNormalized==='Завершено').length,
+    inWork:list.filter(r=>r.executionStatusNormalized==='На исполнении').length
+  };
+}
+function getIncomingKPIs(list){
+  return {
+    total:list.length,
+    overdue:list.filter(isIOverdue).length,
+    due7:list.filter(isIDue7).length,
+    done:list.filter(r=>r.executionStatusNormalized==='Выполнено').length,
+    inWork:list.filter(isIncUnfinished).length
+  };
+}
+
+function applyMetricAndTab(list, type){
+  let out=list;
+  const m=state.selectedMetric;
+  if(type==='protocol'){
+    if(m==='p-overdue') out=out.filter(isProtoOverdue);
+    else if(m==='p-inwork') out=out.filter(r=>r.controlStatusNormalized==='В работе');
+    else if(m==='p-working') out=out.filter(r=>r.controlStatusNormalized==='Рабочий контроль');
+    else if(m==='p-pending') out=out.filter(r=>r.controlStatusNormalized==='На снятии с контроля');
+    else if(m==='p-removed') out=out.filter(r=>r.controlStatusNormalized==='Снят с контроля');
+  } else if(type==='eotinish'){
+    if(m==='e-overdue') out=out.filter(isEOverdue);
+    else if(m==='e-due7') out=out.filter(isEDue7);
+    else if(m==='e-done') out=out.filter(r=>r.executionStatusNormalized==='Завершено');
+    const tab=state.filters.tab || (state.activePage==='eotinish' && !m ? 'active' : null);
+    if(tab==='active') out=out.filter(r=>r.executionStatusNormalized==='На исполнении');
+    else if(tab==='overdue') out=out.filter(isEOverdue);
+    else if(tab==='done') out=out.filter(r=>r.executionStatusNormalized==='Завершено');
+  } else if(type==='incoming'){
+    if(m==='i-overdue') out=out.filter(isIOverdue);
+    else if(m==='i-due7') out=out.filter(isIDue7);
+    else if(m==='i-done') out=out.filter(r=>r.executionStatusNormalized==='Выполнено');
+    if(state.filters.tab==='active') out=out.filter(isIncUnfinished);
+    else if(state.filters.tab==='overdue') out=out.filter(isIOverdue);
+    else if(state.filters.tab==='done') out=out.filter(r=>r.executionStatusNormalized==='Выполнено');
+  }
+  return out;
+}
+
+function getAttentionList(){
+  const items=[];
+  applyCommonFilters(state.protocols,'protocol').forEach(r=>{
+    if(r.controlStatusNormalized==='Снят с контроля') return;
+    let signal=null,prio=99;
+    if(isProtoOverdue(r)){ signal='Просрочено'; prio=1; }
+    else {
+      const d=daysBetween(r.deadlineDate, state.referenceDate);
+      if(d===0){signal='Сегодня';prio=2;}
+      else if(d>0&&d<=3){signal='До 3 дней';prio=3;}
+      else if(d>3&&d<=7){signal='До 7 дней';prio=4;}
+    }
+    if(signal) items.push({type:'protocol',title:r.assignmentText||r.protocol,responsible:r.responsibleRaw,department:r.department,deadline:formatDate(r.deadlineDate),signal,prio,record:r});
+  });
+  applyCommonFilters(state.eOtinish,'eotinish').forEach(r=>{
+    if(r.executionStatusNormalized!=='На исполнении') return;
+    let signal=null,prio=99;
+    if(r.daysRemaining!=null && r.daysRemaining<0){signal='Просрочено';prio=1;}
+    else if(r.daysRemaining===0){signal='Сегодня';prio=2;}
+    else if(r.daysRemaining>0&&r.daysRemaining<=3){signal='До 3 дней';prio=3;}
+    else if(r.daysRemaining>3&&r.daysRemaining<=7){signal='До 7 дней';prio=4;}
+    if(signal) items.push({type:'eotinish',title:r.summary||r.appealNumber,responsible:r.responsibleEmployee,department:r.department,deadline:formatDate(r.deadline),signal,prio,record:r});
+  });
+  applyCommonFilters(state.incoming,'incoming').forEach(r=>{
+    if(r.executionStatusNormalized==='Выполнено') return;
+    let signal=null,prio=99;
+    if(r.daysRemaining!=null && r.daysRemaining<0){signal='Просрочено';prio=1;}
+    else if(r.daysRemaining===0){signal='Сегодня';prio=2;}
+    else if(r.daysRemaining>0&&r.daysRemaining<=3){signal='До 3 дней';prio=3;}
+    else if(r.daysRemaining>3&&r.daysRemaining<=7){signal='До 7 дней';prio=4;}
+    if(signal) items.push({type:'incoming',title:r.summary||r.registrationNumberAndDate,responsible:r.responsibleEmployee,department:r.department,deadline:formatDate(r.deadline),signal,prio,record:r});
+  });
+  return items.sort((a,b)=>a.prio-b.prio).slice(0,80);
+}
+
+function nextAction(r,type){
+  if(type==='protocol'){
+    if(isProtoOverdue(r)) return 'Представить результат';
+    if(r.controlStatusNormalized==='На снятии с контроля') return 'Утвердить снятие';
+    if(r.controlStatusNormalized==='Снят с контроля') return 'Результат подтверждён';
+    return 'Проверить готовность';
+  }
+  if(type==='eotinish'){
+    if(r.executionStatusNormalized==='Завершено') return 'Результат подтверждён';
+    if(r.daysRemaining!=null && r.daysRemaining<0) return 'Проверить готовность ответа';
+    return 'Проверить уведомление';
+  }
+  if(r.executionStatusNormalized==='Выполнено') return 'Результат подтверждён';
+  if(r.daysRemaining!=null && r.daysRemaining<0) return 'Уточнить результат';
+  return 'Уточнить исполнение';
+}
+
+const DB_NAME='vzhdo-dashboard-v2';
+function openDB(){
+  return new Promise((res,rej)=>{
+    const req=indexedDB.open(DB_NAME,1);
+    req.onupgradeneeded=()=>{ if(!req.result.objectStoreNames.contains('datasets')) req.result.createObjectStore('datasets'); };
+    req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error);
+  });
+}
+async function saveToIDB(){
+  try{
+    const db=await openDB();
+    const tx=db.transaction('datasets','readwrite');
+    tx.objectStore('datasets').put({protocols:state.protocols,eOtinish:state.eOtinish,incoming:state.incoming,structure:state.structure,meta:state.meta,savedAt:new Date().toISOString()},'main');
+  }catch(e){ console.warn(e); }
+}
+async function loadFromIDB(){
+  try{
+    const db=await openDB();
+    const tx=db.transaction('datasets','readonly');
+    const req=tx.objectStore('datasets').get('main');
+    return await new Promise(r=>{ req.onsuccess=()=>r(req.result||null); req.onerror=()=>r(null); });
+  }catch{ return null; }
+}
+
+async function handleFile(file, type){
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:'array', cellDates:true});
+  if(type==='structure'){
+    const result=parseStructure(wb);
+    const staged=result.employees;
+    state.structure=staged;
+    state.meta.structure={fileName:file.name,sheetName:result.sheetName,validCount:result.validCount,loadedAt:new Date().toISOString(),bundled:false};
+    reenrichAll();
+  } else if(type==='protocols'){
+    const result=parseProtocols(wb, state.structure);
+    state.protocols=result.records;
+    state.meta.protocols={fileName:file.name,sheetName:result.sheetName,validCount:result.validCount,ignoredCount:result.ignoredCount,loadedAt:new Date().toISOString()};
+  } else if(type==='eotinish'){
+    const result=parseEOtinish(wb, state.structure);
+    state.eOtinish=result.records;
+    state.meta.eOtinish={fileName:file.name,sheetName:result.sheetName,validCount:result.validCount,ignoredCount:result.ignoredCount,loadedAt:new Date().toISOString()};
+  } else if(type==='incoming'){
+    const result=parseIncoming(wb, state.structure);
+    state.incoming=result.records;
+    state.meta.incoming={fileName:file.name,sheetName:result.sheetName,validCount:result.validCount,ignoredCount:result.ignoredCount,loadedAt:new Date().toISOString()};
+  }
+  state.dataLoaded=state.protocols.length+state.eOtinish.length+state.incoming.length>0;
+  await saveToIDB();
+  render();
+}
+
+function reenrichAll(){
+  state.protocols=state.protocols.map(r=>{
+    const en=mapEmployeeToStructure(r.responsiblePersons?.[0]||r.responsibleRaw, state.structure);
+    return {...r,...en};
+  });
+  state.eOtinish=state.eOtinish.map(r=>{
+    const en=mapEmployeeToStructure(r.responsibleEmployee, state.structure);
+    return {...r, department:r.department && r.department!=='Не определено'?r.department:en.department, departmentHead:en.departmentHead, curator:en.curator};
+  });
+  state.incoming=state.incoming.map(r=>{
+    const en=mapEmployeeToStructure(r.responsibleEmployee, state.structure);
+    return {...r, department:r.department && r.department!=='Не определено'?r.department:en.department, departmentHead:en.departmentHead, curator:en.curator};
+  });
+}
+
+function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function uniqueValues(arr, fn){ const s=new Set(); arr.forEach(r=>{ const v=normalizeText(fn(r)); if(v && v!=='Не определено') s.add(v); }); return [...s].sort(); }
+
+function statusBadge(st){
+  const map={'Просрочено':'bg-red-100 text-red-700','В работе':'bg-amber-100 text-amber-800','Рабочий контроль':'bg-yellow-100 text-yellow-800','На снятии с контроля':'bg-orange-100 text-orange-700','Снят с контроля':'bg-green-100 text-green-700','Завершено':'bg-sky-100 text-sky-700','Выполнено':'bg-sky-100 text-sky-700','На исполнении':'bg-blue-100 text-blue-700','Не исполнено':'bg-red-100 text-red-700','Сегодня':'bg-amber-100 text-amber-800','До 3 дней':'bg-yellow-100 text-yellow-800','До 7 дней':'bg-yellow-100 text-yellow-800'};
+  return `<span class="status-badge ${map[st]||'bg-slate-100 text-slate-600'}">${esc(st||'—')}</span>`;
+}
+function kpiCard(title,value,sub,color,icon,key){
+  const colors={green:'bg-emerald-50 border-emerald-200 text-emerald-700',red:'bg-red-50 border-red-200 text-red-600',amber:'bg-amber-50 border-amber-200 text-amber-700',yellow:'bg-yellow-50 border-yellow-200 text-yellow-700',orange:'bg-orange-50 border-orange-200 text-orange-600',blue:'bg-sky-50 border-sky-200 text-sky-700',lightgreen:'bg-green-50 border-green-200 text-green-700'};
+  const icons={check:'check-circle',alert:'alert-circle',clock:'clock',monitor:'monitor',doc:'file-text',lock:'unlock',list:'list'};
+  const sel=state.selectedMetric===key?'ring-2 ring-blue-500':'';
+  return `<div class="kpi-card rounded-xl border p-4 ${colors[color]} ${sel}" onclick="selectMetric('${key}')">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 rounded-full bg-white/80 flex items-center justify-center"><i data-lucide="${icons[icon]}" class="w-5 h-5"></i></div>
+      <div><div class="text-xs font-semibold uppercase tracking-wide opacity-80">${title}</div>
+      <div class="text-3xl font-bold mt-0.5">${value??'—'}</div>
+      <div class="text-xs mt-1 opacity-70">${sub||''}</div>
+      <div class="text-xs mt-2 font-medium text-blue-600">Открыть →</div></div>
+    </div></div>`;
+}
+
+function filterSelect(label,key,options){
+  return `<select class="border rounded-lg px-3 py-2 text-sm bg-white" onchange="setFilter('${key}', this.value)">
+    <option value="ALL">${label}: все</option>
+    ${options.map(c=>`<option value="${esc(c)}" ${state.filters[key]===c?'selected':''}>${esc(c)}</option>`).join('')}
+  </select>`;
+}
+function periodSelect(){
+  return `<select class="border rounded-lg px-3 py-2 text-sm bg-white" onchange="setPeriodPreset(this.value)">
+    <option value="ALL" ${state.filters.periodPreset==='ALL'?'selected':''}>Период: все</option>
+    <option value="today">Сегодня</option><option value="7">7 дней</option><option value="30">30 дней</option>
+    <option value="month">Текущий месяц</option><option value="prevmonth">Предыдущий месяц</option>
+    <option value="quarter">Текущий квартал</option><option value="year">Текущий год</option>
+  </select>`;
+}
+function deadlineSelect(){
+  return `<select class="border rounded-lg px-3 py-2 text-sm bg-white" onchange="setFilter('deadlineCategory', this.value)">
+    <option value="ALL">Сроки исполнения: все</option>
+    <option value="overdue" ${state.filters.deadlineCategory==='overdue'?'selected':''}>Просрочено</option>
+    <option value="today">Сегодня</option><option value="d13">1–3 дня</option>
+    <option value="d47">4–7 дней</option><option value="d830">8–30 дней</option>
+    <option value="d30p">Более 30 дней</option>
+  </select>`;
+}
+function chips(){
+  const f=state.filters; const items=[];
+  const add=(k,label,v)=>{ if(v&&v!=='ALL') items.push(`<button class="filter-chip" onclick="setFilter('${k}','ALL')">${label}: ${esc(v)} ×</button>`); };
+  add('curator','Куратор',f.curator); add('departmentHead','Рук. подразделения',f.departmentHead);
+  add('department','Подразделение',f.department); add('responsible','Ответственный',f.responsible);
+  add('status','Статус',f.status); add('appealType','Вид',f.appealType);
+  add('applicant','Заявитель',f.applicant); add('correspondent','Корреспондент',f.correspondent);
+  add('deadlineCategory','Срок',f.deadlineCategory);
+  if(f.searchQuery) items.push(`<button class="filter-chip" onclick="setFilter('searchQuery','')">Поиск: ${esc(f.searchQuery)} ×</button>`);
+  if(!items.length) return '';
+  return `<div class="flex flex-wrap gap-2 mb-3">${items.join('')}<button class="text-xs text-blue-600" onclick="resetFilters()">Сбросить фильтры</button></div>`;
+}
+
+function renderOverview(){
+  const pF=applyCommonFilters(state.protocols,'protocol');
+  const eF=applyCommonFilters(state.eOtinish,'eotinish');
+  const iF=applyCommonFilters(state.incoming,'incoming');
+  const pK=getProtocolKPIs(pF), eK=getEOtinishKPIs(eF), iK=getIncomingKPIs(iF);
+  const att=getAttentionList();
+  return `<h1 class="text-2xl font-bold mb-6">Исполнительская дисциплина</h1>
+  <h2 class="text-lg font-semibold mb-3">Протокольные поручения</h2>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+    ${kpiCard('ВСЕГО',pK.total,'Подтверждённый результат','green','check','p-total')}
+    ${kpiCard('ПРОСРОЧЕНО',pK.overdue,'Требует вмешательства','red','alert','p-overdue')}
+    ${kpiCard('В РАБОТЕ',pK.inWork,'Предупредить просрочку','amber','clock','p-inwork')}
+  </div>
+  <h2 class="text-lg font-semibold mb-3">Другие документы</h2>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+    <div class="bg-white rounded-xl border p-4 flex items-center justify-between cursor-pointer hover:shadow-md" onclick="navigate('eotinish')">
+      <div class="flex items-center gap-3"><div class="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center"><i data-lucide="file-text" class="w-5 h-5 text-blue-600"></i></div>
+      <div><div class="font-semibold">e-Өтініш</div>
+      <div class="flex gap-2 mt-1 text-xs">
+        <span class="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Всего ${eK.total}</span>
+        <span class="px-2 py-0.5 rounded-full bg-red-50 text-red-600">Просрочено ${eK.overdue}</span>
+        <span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">В работе ${eK.inWork}</span>
+      </div></div></div><i data-lucide="chevron-right" class="w-5 h-5 text-slate-400"></i></div>
+    <div class="bg-white rounded-xl border p-4 flex items-center justify-between cursor-pointer hover:shadow-md" onclick="navigate('incoming')">
+      <div class="flex items-center gap-3"><div class="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center"><i data-lucide="folder" class="w-5 h-5 text-indigo-600"></i></div>
+      <div><div class="font-semibold">Входящие по сроку</div>
+      <div class="flex gap-2 mt-1 text-xs">
+        <span class="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Всего ${iK.total}</span>
+        <span class="px-2 py-0.5 rounded-full bg-red-50 text-red-600">Просрочено ${iK.overdue}</span>
+        <span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">В работе ${iK.inWork}</span>
+      </div></div></div><i data-lucide="chevron-right" class="w-5 h-5 text-slate-400"></i></div>
+  </div>
+  <div class="bg-white rounded-xl border">
+    <div class="px-5 py-4 border-b flex justify-between"><h2 class="text-lg font-semibold">Что требует внимания</h2><span class="text-xs text-slate-400">${att.length} записей</span></div>
+    <div class="table-wrap"><table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+      <th class="px-5 py-3">Поручение / документ</th><th class="px-3 py-3">Ответственный</th><th class="px-3 py-3">Подразделение</th><th class="px-3 py-3">Срок / отклонение</th><th class="px-3 py-3">Сигнал</th>
+    </tr></thead><tbody>
+    ${att.length?att.map(a=>`<tr class="border-b hover:bg-slate-50 cursor-pointer" onclick='openRecord(${JSON.stringify(a.record).replace(/'/g,'&#39;')}, "${a.type}")'>
+      <td class="px-5 py-3 max-w-xs truncate">${esc(a.title)}</td><td class="px-3 py-3">${esc(a.responsible)}</td>
+      <td class="px-3 py-3">${esc(a.department)}</td><td class="px-3 py-3">${esc(a.deadline)}</td><td class="px-3 py-3">${statusBadge(a.signal)}</td></tr>`).join('')
+      :`<tr><td colspan="5" class="px-5 py-8 text-center empty-state">Нет данных по выбранным условиям</td></tr>`}
+    </tbody></table></div></div>`;
+}
+
+function renderProtocols(){
+  const base=applyCommonFilters(state.protocols,'protocol');
+  const kpis=getProtocolKPIs(base);
+  const rows=applyMetricAndTab(base,'protocol');
+  const curators=uniqueValues(state.protocols,r=>r.curator);
+  const heads=uniqueValues(state.protocols,r=>r.departmentHead);
+  const depts=uniqueValues(state.protocols,r=>r.department);
+  const resps=uniqueValues(state.protocols,r=>r.responsibleRaw);
+  return `<h1 class="text-2xl font-bold mb-4">Контроль протокольных поручений</h1>
+  <div class="flex flex-wrap gap-2 mb-3">
+    ${periodSelect()}
+    ${filterSelect('Руководитель-куратор','curator',curators)}
+    ${filterSelect('Руководитель подразделения','departmentHead',heads)}
+    ${filterSelect('Подразделение','department',depts)}
+    ${filterSelect('Ответственный','responsible',resps)}
+    ${deadlineSelect()}
+    <select class="border rounded-lg px-3 py-2 text-sm bg-white" onchange="setFilter('status', this.value)">
+      <option value="ALL">Статус контроля: все</option>
+      ${['Просрочено','В работе','Рабочий контроль','На снятии с контроля','Снят с контроля'].map(c=>`<option ${state.filters.status===c?'selected':''}>${c}</option>`).join('')}
+    </select>
+    <input type="search" placeholder="Поиск..." class="border rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px]" value="${esc(state.filters.searchQuery)}" oninput="setFilter('searchQuery', this.value)"/>
+    <button class="text-sm text-blue-600 px-3" onclick="resetFilters()">Сбросить фильтры</button>
+    <button class="text-sm text-slate-600 px-3" onclick="exportVisible('protocol')">Экспортировать список</button>
+  </div>${chips()}
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+    ${kpiCard('ВСЕГО',kpis.total,'Подтверждённый результат','green','check','p-total')}
+    ${kpiCard('ПРОСРОЧЕНО',kpis.overdue,'Требует вмешательства','red','alert','p-overdue')}
+    ${kpiCard('В РАБОТЕ',kpis.inWork,'Предупредить просрочку','amber','clock','p-inwork')}
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    ${kpiCard('РАБОЧИЙ КОНТРОЛЬ',kpis.working,'Контроль исполнения','yellow','monitor','p-working')}
+    ${kpiCard('НА СНЯТИИ С КОНТРОЛЯ',kpis.pending,'Ожидает подтверждения','orange','doc','p-pending')}
+    ${kpiCard('СНЯТ С КОНТРОЛЯ',kpis.removed,'Исполнение подтверждено','lightgreen','lock','p-removed')}
+  </div>
+  <div class="bg-white rounded-xl border" id="data-table">
+    <div class="px-5 py-4 border-b flex justify-between"><h2 class="text-lg font-semibold">Что требует внимания <span class="text-slate-400 text-sm">(${rows.length})</span></h2></div>
+    <div class="table-wrap"><table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+      <th class="px-3 py-3">№ протокола и дата</th><th class="px-3 py-3">№ поручения</th><th class="px-3 py-3">Содержание поручения</th>
+      <th class="px-3 py-3">Ответственный</th><th class="px-3 py-3">Подразделение</th><th class="px-3 py-3">Рук. подразделения</th>
+      <th class="px-3 py-3">Куратор</th><th class="px-3 py-3">Срок</th><th class="px-3 py-3">Состояние контроля</th><th class="px-3 py-3">Что требуется</th>
+    </tr></thead><tbody>
+    ${rows.length?rows.map(r=>`<tr class="border-b hover:bg-slate-50 cursor-pointer" onclick='openRecord(${JSON.stringify(r).replace(/'/g,'&#39;')},"protocol")'>
+      <td class="px-3 py-3 whitespace-nowrap">${esc(r.protocol)}</td><td class="px-3 py-3">${esc(r.assignmentNumber)}</td>
+      <td class="px-3 py-3 max-w-[220px] truncate">${esc(r.assignmentText)}</td><td class="px-3 py-3">${esc(r.responsibleRaw)}</td>
+      <td class="px-3 py-3 max-w-[140px] truncate">${esc(r.department)}</td><td class="px-3 py-3">${esc(r.departmentHead)}</td>
+      <td class="px-3 py-3">${esc(r.curator)}</td><td class="px-3 py-3">${formatDate(r.deadlineDate)}</td>
+      <td class="px-3 py-3">${statusBadge(r.controlStatusNormalized)}</td><td class="px-3 py-3 text-blue-600">${nextAction(r,'protocol')} →</td>
+    </tr>`).join(''):`<tr><td colspan="10" class="px-5 py-8 text-center empty-state">Нет данных по выбранным условиям</td></tr>`}
+    </tbody></table></div></div>`;
+}
+
+function renderEOtinish(){
+  const base=applyCommonFilters(state.eOtinish,'eotinish');
+  const kpis=getEOtinishKPIs(base);
+  if(state.filters.tab==null && !state.selectedMetric) state.filters.tab='active';
+  const rows=applyMetricAndTab(base,'eotinish');
+  const types=uniqueValues(state.eOtinish,r=>r.appealType);
+  const apps=uniqueValues(state.eOtinish,r=>r.applicant);
+  const curators=uniqueValues(state.eOtinish,r=>r.curator);
+  const heads=uniqueValues(state.eOtinish,r=>r.departmentHead);
+  const depts=uniqueValues(state.eOtinish,r=>r.department);
+  const resps=uniqueValues(state.eOtinish,r=>r.responsibleEmployee);
+  const tab=state.filters.tab||'active';
+  return `<h1 class="text-2xl font-bold mb-4">Контроль обращений e-Өтініш</h1>
+  <div class="flex flex-wrap gap-2 mb-3">
+    ${filterSelect('Вид обращения','appealType',types)}
+    ${filterSelect('Заявитель','applicant',apps)}
+    ${filterSelect('Руководитель-куратор','curator',curators)}
+    ${filterSelect('Руководитель подразделения','departmentHead',heads)}
+    ${filterSelect('Подразделение','department',depts)}
+    ${filterSelect('Ответственный','responsible',resps)}
+    ${periodSelect()} ${deadlineSelect()}
+    <select class="border rounded-lg px-3 py-2 text-sm bg-white" onchange="setFilter('status', this.value)">
+      <option value="ALL">Статус: все</option>
+      <option ${state.filters.status==='На исполнении'?'selected':''}>На исполнении</option>
+      <option ${state.filters.status==='Завершено'?'selected':''}>Завершено</option>
+    </select>
+    <input type="search" placeholder="Номер / текст / заявитель" class="border rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px]" value="${esc(state.filters.searchQuery)}" oninput="setFilter('searchQuery', this.value)"/>
+    <button class="text-sm text-blue-600" onclick="resetFilters()">Сбросить</button>
+    <button class="text-sm text-slate-600" onclick="exportVisible('eotinish')">Экспортировать список</button>
+  </div>${chips()}
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    ${kpiCard('ПРОСРОЧЕНО',kpis.overdue,'Обращения с истёкшим сроком ответа','red','alert','e-overdue')}
+    ${kpiCard('СРОК ДО 7 ДНЕЙ',kpis.due7,'Требуют внимания в ближайшее время','amber','clock','e-due7')}
+    ${kpiCard('ЗАВЕРШЕНО',kpis.done,'Ответ или решение предоставлено','blue','list','e-done')}
+  </div>
+  <div class="bg-white rounded-xl border" id="data-table">
+    <div class="px-5 py-4 border-b"><h2 class="text-lg font-semibold mb-3">Обращения, требующие внимания <span class="text-slate-400 text-sm">(${rows.length})</span></h2>
+      <div class="flex gap-2">
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${tab==='active'?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab','active')">На исполнении</button>
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${tab==='overdue'?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab','overdue')">Просроченные</button>
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${tab==='done'?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab','done')">Завершённые</button>
+      </div></div>
+    <div class="table-wrap"><table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+      <th class="px-3 py-3">Номер и заявитель</th><th class="px-3 py-3">Вид</th><th class="px-3 py-3">Краткое содержание</th>
+      <th class="px-3 py-3">Ответственный</th><th class="px-3 py-3">Подразделение</th><th class="px-3 py-3">Рук. подразделения</th>
+      <th class="px-3 py-3">Куратор</th><th class="px-3 py-3">Срок ответа</th><th class="px-3 py-3">До срока / отклонение</th>
+      <th class="px-3 py-3">Статус</th><th class="px-3 py-3">Что требуется дальше</th>
+    </tr></thead><tbody>
+    ${rows.length?rows.map(r=>{
+      let days='—';
+      if(r.daysRemaining!=null) days=r.daysRemaining<0?`Просрочено ${Math.abs(r.daysRemaining)} дн.`:`Осталось ${r.daysRemaining} дн.`;
+      return `<tr class="border-b hover:bg-slate-50 cursor-pointer" onclick='openRecord(${JSON.stringify(r).replace(/'/g,'&#39;')},"eotinish")'>
+        <td class="px-3 py-3"><div class="font-medium">${esc(r.appealNumber)}</div><div class="text-xs text-slate-500">${esc(r.applicant)}</div></td>
+        <td class="px-3 py-3">${r.appealType?`<span class="status-badge bg-orange-50 text-orange-700">${esc(r.appealType)}</span>`:'—'}</td>
+        <td class="px-3 py-3 max-w-[180px] truncate">${esc(r.summary)}</td>
+        <td class="px-3 py-3">${esc(r.responsibleEmployee)}</td><td class="px-3 py-3 max-w-[140px] truncate">${esc(r.department)}</td>
+        <td class="px-3 py-3">${esc(r.departmentHead)}</td><td class="px-3 py-3">${esc(r.curator)}</td>
+        <td class="px-3 py-3">${formatDate(r.deadline)}</td>
+        <td class="px-3 py-3">${r.daysRemaining!=null&&r.daysRemaining<0?statusBadge('Просрочено'):esc(days)}</td>
+        <td class="px-3 py-3">${statusBadge(r.executionStatusNormalized)}</td>
+        <td class="px-3 py-3 text-blue-600">${nextAction(r,'eotinish')} →</td></tr>`;
+    }).join(''):`<tr><td colspan="11" class="px-5 py-8 text-center empty-state">Нет данных по выбранным условиям</td></tr>`}
+    </tbody></table></div></div>`;
+}
+
+function renderIncoming(){
+  const base=applyCommonFilters(state.incoming,'incoming');
+  const kpis=getIncomingKPIs(base);
+  const rows=applyMetricAndTab(base,'incoming');
+  const corrs=uniqueValues(state.incoming,r=>r.correspondent);
+  const curators=uniqueValues(state.incoming,r=>r.curator);
+  const heads=uniqueValues(state.incoming,r=>r.departmentHead);
+  const depts=uniqueValues(state.incoming,r=>r.department);
+  const resps=uniqueValues(state.incoming,r=>r.responsibleEmployee);
+  return `<h1 class="text-2xl font-bold mb-4">Контроль входящих документов</h1>
+  <div class="flex flex-wrap gap-2 mb-3">
+    ${periodSelect()}
+    ${filterSelect('Корреспондент','correspondent',corrs)}
+    ${filterSelect('Руководитель-куратор','curator',curators)}
+    ${filterSelect('Руководитель подразделения','departmentHead',heads)}
+    ${filterSelect('Подразделение','department',depts)}
+    ${filterSelect('Ответственный','responsible',resps)}
+    ${deadlineSelect()}
+    <select class="border rounded-lg px-3 py-2 text-sm bg-white" onchange="setFilter('status', this.value)">
+      <option value="ALL">Статус: все</option>
+      <option ${state.filters.status==='Не исполнено'?'selected':''}>Не исполнено</option>
+      <option ${state.filters.status==='На исполнении'?'selected':''}>На исполнении</option>
+      <option ${state.filters.status==='Выполнено'?'selected':''}>Выполнено</option>
+    </select>
+    <input type="search" placeholder="Номер / содержание / исполнитель" class="border rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px]" value="${esc(state.filters.searchQuery)}" oninput="setFilter('searchQuery', this.value)"/>
+    <button class="text-sm text-blue-600" onclick="resetFilters()">Сбросить</button>
+    <button class="text-sm text-slate-600" onclick="exportVisible('incoming')">Экспортировать список</button>
+  </div>${chips()}
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    ${kpiCard('ПРОСРОЧЕНО',kpis.overdue,'Неисполненные документы с истёкшим сроком','red','alert','i-overdue')}
+    ${kpiCard('СРОК ДО 7 ДНЕЙ',kpis.due7,'Ближайшие сроки исполнения','amber','clock','i-due7')}
+    ${kpiCard('ВЫПОЛНЕНО',kpis.done,'По статусу в выгрузке','blue','list','i-done')}
+  </div>
+  <div class="bg-white rounded-xl border" id="data-table">
+    <div class="px-5 py-4 border-b"><h2 class="text-lg font-semibold mb-3">Входящие документы и действия <span class="text-slate-400 text-sm">(${rows.length})</span></h2>
+      <div class="flex gap-2">
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${!state.filters.tab?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab',null)">Все</button>
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${state.filters.tab==='active'?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab','active')">На исполнении</button>
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${state.filters.tab==='overdue'?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab','overdue')">Просроченные</button>
+        <button class="px-4 py-1.5 rounded-lg text-sm font-medium ${state.filters.tab==='done'?'bg-blue-600 text-white':'bg-slate-100'}" onclick="setFilter('tab','done')">Выполненные</button>
+      </div></div>
+    <div class="table-wrap"><table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+      <th class="px-3 py-3">Номер / корреспондент</th><th class="px-3 py-3">Исх. № / дата</th><th class="px-3 py-3">Краткое содержание</th>
+      <th class="px-3 py-3">Подразделение</th><th class="px-3 py-3">Ответственный</th><th class="px-3 py-3">Рук. подразделения</th>
+      <th class="px-3 py-3">Куратор</th><th class="px-3 py-3">Срок исполнения</th><th class="px-3 py-3">Отклонение</th>
+      <th class="px-3 py-3">Статус</th><th class="px-3 py-3">Следующее действие</th>
+    </tr></thead><tbody>
+    ${rows.length?rows.map(r=>{
+      let dev='—';
+      if(r.daysRemaining!=null) dev=r.daysRemaining<0?`${Math.abs(r.daysRemaining)} дней`:r.daysRemaining===0?'Сегодня':`${r.daysRemaining} дн.`;
+      return `<tr class="border-b hover:bg-slate-50 cursor-pointer" onclick='openRecord(${JSON.stringify(r).replace(/'/g,'&#39;')},"incoming")'>
+        <td class="px-3 py-3"><div class="font-medium">${esc(r.registrationNumberAndDate)}</div><div class="text-xs text-slate-500">${esc(r.correspondent)}</div></td>
+        <td class="px-3 py-3">${esc(r.externalNumberDate)}</td>
+        <td class="px-3 py-3 max-w-[180px] truncate">${esc(r.summary)}</td>
+        <td class="px-3 py-3 max-w-[140px] truncate">${esc(r.department)}</td>
+        <td class="px-3 py-3">${esc(r.responsibleEmployee)}</td>
+        <td class="px-3 py-3">${esc(r.departmentHead)}</td><td class="px-3 py-3">${esc(r.curator)}</td>
+        <td class="px-3 py-3">${formatDate(r.deadline)}</td>
+        <td class="px-3 py-3">${r.daysRemaining!=null&&r.daysRemaining<0?`<span class="status-badge bg-red-100 text-red-700">${esc(dev)}</span>`:esc(dev)}</td>
+        <td class="px-3 py-3">${statusBadge(r.executionStatusNormalized)}</td>
+        <td class="px-3 py-3 text-blue-600">${nextAction(r,'incoming')} →</td></tr>`;
+    }).join(''):`<tr><td colspan="11" class="px-5 py-8 text-center empty-state">Нет данных по выбранным условиям</td></tr>`}
+    </tbody></table></div></div>`;
+}
+
+function renderUpload(){
+  const m=state.meta;
+  return `<h1 class="text-2xl font-bold mb-2">Загрузка данных</h1>
+  <p class="text-slate-500 mb-6">Положите <b>Структура.xlsx</b> в корень репозитория рядом с index.html — сайт сам считает её при открытии. Файлы 1 / 2 / 3 грузятся только в браузере и на GitHub не нужны.</p>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    ${uploadCard('1.xlsx — Протокольные поручения','protocols',m.protocols)}
+    ${uploadCard('2.xlsx — e-Өтініш','eotinish',m.eOtinish)}
+    ${uploadCard('3.xlsx — Входящие документы','incoming',m.incoming)}
+    ${uploadCard('Структура.xlsx — оргструктура (из корня сайта или вручную)','structure',m.structure)}
+  </div>
+  <div class="bg-white rounded-xl border p-5">
+    <h3 class="font-semibold mb-2">Статус данных</h3>
+    <ul class="text-sm space-y-1 text-slate-600">
+      <li>Структура: ${state.structure.length} сотрудников ${m.structure?('• '+esc(m.structure.fileName||'')): 'не загружена'}</li>
+      <li>Протоколы: ${state.protocols.length} ${m.protocols?'• '+new Date(m.protocols.loadedAt).toLocaleString('ru-RU'):''}</li>
+      <li>e-Өтініш: ${state.eOtinish.length} ${m.eOtinish?'• '+new Date(m.eOtinish.loadedAt).toLocaleString('ru-RU'):''}</li>
+      <li>Входящие: ${state.incoming.length} ${m.incoming?'• '+new Date(m.incoming.loadedAt).toLocaleString('ru-RU'):''}</li>
+    </ul>
+    <button onclick="clearData()" class="mt-4 text-sm text-red-600 hover:underline">Очистить загруженные данные</button>
+  </div>
+  ${!state.dataLoaded?`<div class="mt-6 p-6 bg-amber-50 border border-amber-200 rounded-xl text-center">
+    <p class="font-medium text-amber-800">Данные не загружены</p>
+    <p class="text-sm text-amber-700 mt-1">Нужны Структура.xlsx в корне сайта и загрузка 1.xlsx, 2.xlsx, 3.xlsx в этом разделе.</p>
+  </div>`:''}`;
+}
+function uploadCard(title,type,meta){
+  return `<div class="bg-white rounded-xl border p-5"><div class="font-semibold mb-2">${title}</div>
+    ${meta?`<div class="text-xs text-slate-500 mb-3">Файл: ${esc(meta.fileName||'—')}<br/>Лист: ${esc(meta.sheetName||'—')}<br/>Записей: ${meta.validCount}${meta.ignoredCount!=null?' (игнор. '+meta.ignoredCount+')':''}<br/>${meta.loadedAt?('Загружен: '+new Date(meta.loadedAt).toLocaleString('ru-RU')):''}</div>`:`<div class="text-xs text-slate-400 mb-3">Файл не загружен</div>`}
+    <label class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm cursor-pointer hover:bg-blue-700">
+      <i data-lucide="upload" class="w-4 h-4"></i> Выбрать файл
+      <input type="file" accept=".xlsx,.xls" class="hidden" onchange="onFileSelected(event,'${type}')"/>
+    </label></div>`;
+}
+
+window.navigate=function(page, keepMetric){
+  state.activePage=page;
+  if(!keepMetric) state.selectedMetric=null;
+  if(page==='eotinish' && state.filters.tab==null && !state.selectedMetric) state.filters.tab='active';
+  if(page!=='eotinish' && page!=='incoming') state.filters.tab=null;
+  document.querySelectorAll('.nav-item').forEach(el=>{
+    el.classList.toggle('active', el.dataset.page===page);
+    el.classList.toggle('text-slate-300', el.dataset.page!==page);
+  });
+  render();
+};
+window.selectMetric=function(key){
+  const keep=state.selectedMetric===key?null:key;
+  state.selectedMetric=keep;
+  if(key.startsWith('p-') && state.activePage!=='protocols'){ navigate('protocols', true); scrollTable(); return; }
+  if(key.startsWith('e-') && state.activePage!=='eotinish'){ state.filters.tab=null; navigate('eotinish', true); scrollTable(); return; }
+  if(key.startsWith('i-') && state.activePage!=='incoming'){ state.filters.tab=null; navigate('incoming', true); scrollTable(); return; }
+  render(); scrollTable();
+};
+function scrollTable(){ setTimeout(()=>{ document.getElementById('data-table')?.scrollIntoView({behavior:'smooth',block:'start'}); }, 50); }
+window.setFilter=function(k,v){ state.filters[k]=v; if(k==='tab') state.selectedMetric=null; render(); };
+window.setPeriodPreset=function(v){
+  state.filters.periodPreset=v;
+  const now=state.referenceDate;
+  const start=new Date(now), end=new Date(now);
+  if(v==='ALL'){ state.filters.dateStart=null; state.filters.dateEnd=null; }
+  else if(v==='today'){ state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  else if(v==='7'){ start.setDate(start.getDate()-7); state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  else if(v==='30'){ start.setDate(start.getDate()-30); state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  else if(v==='month'){ start.setDate(1); state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  else if(v==='prevmonth'){ start.setMonth(start.getMonth()-1,1); end.setDate(0); state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  else if(v==='quarter'){ const q=Math.floor(start.getMonth()/3)*3; start.setMonth(q,1); state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  else if(v==='year'){ start.setMonth(0,1); state.filters.dateStart=iso(start); state.filters.dateEnd=iso(end); }
+  render();
+};
+function iso(d){ return d.toISOString().slice(0,10); }
+window.resetFilters=function(){ state.filters=emptyFilters(); state.selectedMetric=null; render(); };
+window.onFileSelected=async function(ev,type){
+  const file=ev.target.files[0]; if(!file) return;
+  try{ await handleFile(file,type); alert('Файл успешно загружен.'); }
+  catch(e){ console.error(e); alert('Файл не загружен. Текущие рабочие данные сохранены.\n'+e.message); }
+  ev.target.value='';
+};
+window.clearData=async function(){
+  if(!confirm('Вы действительно хотите удалить локально сохранённые данные дашборда?')) return;
+  state.protocols=[]; state.eOtinish=[]; state.incoming=[];
+  state.structure=[];
+  state.meta={protocols:null,eOtinish:null,incoming:null,structure:null};
+  state.dataLoaded=false;
+  try{ const db=await openDB(); db.transaction('datasets','readwrite').objectStore('datasets').delete('main'); }catch{}
+  render();
+};
+window.exportVisible=function(type){
+  const base=applyCommonFilters(type==='protocol'?state.protocols:type==='eotinish'?state.eOtinish:state.incoming, type==='protocol'?'protocol':type);
+  const rows=applyMetricAndTab(base, type==='protocol'?'protocol':type);
+  const ws=XLSX.utils.json_to_sheet(rows.map(r=>{
+    const o={...r}; delete o.id; return o;
+  }));
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'list');
+  XLSX.writeFile(wb,'vzhdo-export.xlsx');
+};
+window.openRecord=function(record,type){
+  const body=document.getElementById('drawer-body');
+  let html='';
+  if(type==='protocol') html=`<div class="space-y-3 text-sm">
+    <div><span class="text-slate-500">№ протокола</span><div class="font-medium">${esc(record.protocol)}</div></div>
+    <div><span class="text-slate-500">№ поручения</span><div>${esc(record.assignmentNumber)}</div></div>
+    <div><span class="text-slate-500">Содержание</span><div>${esc(record.assignmentText)}</div></div>
+    <div><span class="text-slate-500">Ответственный</span><div>${esc(record.responsibleRaw)}</div></div>
+    <div><span class="text-slate-500">Подразделение</span><div>${esc(record.department)}</div></div>
+    <div><span class="text-slate-500">Руководитель подразделения</span><div>${esc(record.departmentHead)}</div></div>
+    <div><span class="text-slate-500">Руководитель-куратор</span><div>${esc(record.curator)}</div></div>
+    <div><span class="text-slate-500">Срок</span><div>${formatDate(record.deadlineDate)}</div></div>
+    <div><span class="text-slate-500">Статус исполнения</span><div>${esc(record.executionStatusRaw)}</div></div>
+    <div><span class="text-slate-500">Дальнейший контроль</span><div>${esc(record.furtherControl)}</div></div>
+    <div><span class="text-slate-500">Состояние контроля</span><div>${statusBadge(record.controlStatusNormalized)}</div></div>
+    <div class="text-xs text-slate-400">Источник: ${esc(record.sourceFile)} / ${esc(record.sourceSheet)} / строка ${record.sourceRow}</div></div>`;
+  else if(type==='eotinish') html=`<div class="space-y-3 text-sm">
+    <div><span class="text-slate-500">Номер обращения</span><div class="font-medium">${esc(record.appealNumber)}</div></div>
+    <div><span class="text-slate-500">Дата регистрации</span><div>${formatDate(record.registrationDate)}</div></div>
+    <div><span class="text-slate-500">Автор</span><div>${esc(record.applicant)}</div></div>
+    <div><span class="text-slate-500">Вид</span><div>${esc(record.appealType)}</div></div>
+    <div><span class="text-slate-500">Содержание</span><div>${esc(record.summary)}</div></div>
+    <div><span class="text-slate-500">Ответственный</span><div>${esc(record.responsibleEmployee)}</div></div>
+    <div><span class="text-slate-500">Подразделение</span><div>${esc(record.department)}</div></div>
+    <div><span class="text-slate-500">Рук. подразделения</span><div>${esc(record.departmentHead)}</div></div>
+    <div><span class="text-slate-500">Куратор</span><div>${esc(record.curator)}</div></div>
+    <div><span class="text-slate-500">Срок</span><div>${formatDate(record.deadline)}</div></div>
+    <div><span class="text-slate-500">Осталось дней</span><div>${record.daysRemaining??'—'}</div></div>
+    <div><span class="text-slate-500">Дата ответа</span><div>${formatDate(record.responseDate)}</div></div>
+    <div><span class="text-slate-500">Статус</span><div>${statusBadge(record.executionStatusNormalized)}</div></div>
+    <div class="text-xs text-slate-400">Источник: ${esc(record.sourceFile)} / ${esc(record.sourceSheet)} / строка ${record.sourceRow}</div></div>`;
+  else html=`<div class="space-y-3 text-sm">
+    <div><span class="text-slate-500">Рег. номер и дата</span><div class="font-medium">${esc(record.registrationNumberAndDate)}</div></div>
+    <div><span class="text-slate-500">Исх. №, дата</span><div>${esc(record.externalNumberDate)}</div></div>
+    <div><span class="text-slate-500">Корреспондент</span><div>${esc(record.correspondent)}</div></div>
+    <div><span class="text-slate-500">Содержание</span><div>${esc(record.summary)}</div></div>
+    <div><span class="text-slate-500">Ответственный</span><div>${esc(record.responsibleEmployee)}</div></div>
+    <div><span class="text-slate-500">Подразделение</span><div>${esc(record.department)}</div></div>
+    <div><span class="text-slate-500">Рук. подразделения</span><div>${esc(record.departmentHead)}</div></div>
+    <div><span class="text-slate-500">Куратор</span><div>${esc(record.curator)}</div></div>
+    <div><span class="text-slate-500">Срок</span><div>${formatDate(record.deadline)}</div></div>
+    <div><span class="text-slate-500">Осталось / просрочено дней</span><div>${record.daysRemaining??'—'}</div></div>
+    <div><span class="text-slate-500">Внешний срок</span><div>${formatDate(record.externalDeadline)}</div></div>
+    <div><span class="text-slate-500">Статус</span><div>${statusBadge(record.executionStatusNormalized)}</div></div>
+    <div class="text-xs text-slate-400">Источник: ${esc(record.sourceFile)} / ${esc(record.sourceSheet)} / строка ${record.sourceRow}</div></div>`;
+  body.innerHTML=html;
+  document.getElementById('drawer-overlay').classList.remove('hidden');
+  document.getElementById('document-drawer').classList.add('open');
+  lucide.createIcons();
+};
+window.closeDrawer=function(){
+  document.getElementById('document-drawer').classList.remove('open');
+  document.getElementById('drawer-overlay').classList.add('hidden');
+};
+
+function render(){
+  const el=document.getElementById('page-content');
+  if(!state.dataLoaded && state.activePage!=='upload'){
+    el.innerHTML=`<div class="flex flex-col items-center justify-center py-20 text-center">
+      <i data-lucide="database" class="w-16 h-16 text-slate-300 mb-4"></i>
+      <h2 class="text-xl font-semibold text-slate-600 mb-2">Данные не загружены</h2>
+      <p class="text-slate-500 mb-6 max-w-md">Положите Структура.xlsx в корень GitHub-репозитория и загрузите здесь файлы 1.xlsx, 2.xlsx и 3.xlsx.</p>
+      <button onclick="navigate('upload')" class="px-5 py-2.5 bg-blue-600 text-white rounded-lg">Перейти к загрузке</button></div>`;
+  } else {
+    if(state.activePage==='overview') el.innerHTML=renderOverview();
+    else if(state.activePage==='protocols') el.innerHTML=renderProtocols();
+    else if(state.activePage==='eotinish') el.innerHTML=renderEOtinish();
+    else if(state.activePage==='incoming') el.innerHTML=renderIncoming();
+    else el.innerHTML=renderUpload();
+  }
+  lucide.createIcons();
+}
+
+document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>navigate(btn.dataset.page)));
+async function loadStructureFromRepo(){
+  for(const url of STRUCTURE_URLS){
+    try{
+      const res=await fetch(url,{cache:'no-store'});
+      if(!res.ok) continue;
+      const buf=await res.arrayBuffer();
+      const wb=XLSX.read(buf,{type:'array',cellDates:true});
+      const result=parseStructure(wb);
+      state.structure=result.employees;
+      state.meta.structure={fileName:'Структура.xlsx',sheetName:result.sheetName,validCount:result.validCount,loadedAt:new Date().toISOString(),source:'repo'};
+      reenrichAll();
+      await saveToIDB();
+      return true;
+    }catch(e){ console.warn('structure fetch', url, e); }
+  }
+  return false;
+}
+(async function init(){
+  const saved=await loadFromIDB();
+  if(saved){
+    state.protocols=saved.protocols||[];
+    state.eOtinish=saved.eOtinish||[];
+    state.incoming=saved.incoming||[];
+    state.structure=saved.structure||[];
+    state.meta=saved.meta||state.meta;
+    state.dataLoaded=state.protocols.length+state.eOtinish.length+state.incoming.length>0;
+  }
+  await loadStructureFromRepo();
+  render();
+})();
+</script>
+</body>
+</html>
